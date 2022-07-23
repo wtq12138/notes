@@ -153,7 +153,7 @@ protected讲解https://blog.csdn.net/justloveyou_/article/details/61672133
 
 由于protected修饰的原因，如果没有重写的话，那么子类调用的一定是基类Object的clone()方法，这样就会导致，子类与Object不同包，由说明可知，无法访问当前基类的protected方法
 
-重写之后还要实现一个接口Cloneable 这个接口的意义是flag，不是实现其方法
+重写之后还要实现一个接口Cloneable 这个接口的意义是flag，不是实现其方法，否则会抛异常
 
 注意浅拷贝和深拷贝
 
@@ -263,7 +263,7 @@ equals 直接比较引用是否相等
 
 动态分派
 
-调用invokevirtual
+调用invokevirtual            
 
 过程
 
@@ -379,7 +379,11 @@ trimToSize()，需要主动进行操作
 
 ### CopyOnWriteArrayList区别
 
-写时复制 修改时 加锁复制原来数组到新数组修改后将新数组指向原来引用
+思想是读写锁
+
+读 共享一份 
+
+修改时 加锁复制原来数组到新数组修改后将新数组指向原来引用
 
 可以并发读 
 
@@ -520,9 +524,9 @@ static final int hash(Object key) {
 
 
 
-### null相等如何判断
+### 有null的情况 相等如何判断
 
-先判断hash相等，然后判断引用相等，最后判断equals
+先判断hash相等找桶的位置，然后判断引用相等，最后判断equals
 
 ### put操作
 

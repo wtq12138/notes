@@ -1214,7 +1214,7 @@ buf3.addComponents(true, buf1, buf2);
 
 ## 进阶
 
-粘包拆包问题
+### 粘包拆包问题
 
 解决方案
 
@@ -1234,6 +1234,8 @@ ch.pipeline().addLast(new FixedLengthFrameDecoder(8));
 ch.pipeline().addLast(new LineBasedFrameDecoder(1024));
 ```
 
+最好的！
+
 预设长度
 
 ```java
@@ -1250,12 +1252,322 @@ ch.pipeline().addLast(new LineBasedFrameDecoder(1024));
      *        the length of the length field
      * @param lengthAdjustment   长度是报文长度 adjustment是头长度 是额外的
      *        the compensation value to add to the value of the length field
-     * @param initialBytesToStrip
+     * @param initialBytesToStrip 最后需要剥掉前缀长度
      *        the number of first bytes to strip out from the decoded frame
      */
 // 最大长度，长度偏移，长度占用字节，长度调整，剥离字节数
 ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(1024, 0, 1, 0, 1));
+```
 
+### 协议设计与解析
+
+httpserver
+
+```java
+@Slf4j
+public class HttpServer {
+    public static void main(String[] args) {
+        new ServerBootstrap()
+                .group(new NioEventLoopGroup())
+                .channel(NioServerSocketChannel.class)
+                .childHandler(new ChannelInitializer<NioSocketChannel>() {
+                    @Override
+                    protected void initChannel(NioSocketChannel ch) throws Exception {
+                        ch.pipeline().addLast(new LoggingHandler(LogLevel.DEBUG));
+                        ch.pipeline().addLast(new HttpServerCodec());
+                        ch.pipeline().addLast(new SimpleChannelInboundHandler<HttpRequest>() {
+                            @Override
+                            protected void channelRead0(ChannelHandlerContext ctx, HttpRequest msg) throws Exception {
+                                log.debug(msg.uri());
+                                DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+                                byte[] bytes = "<h1>hello</h1>".getBytes();
+                                response.headers().setInt(CONTENT_LENGTH,bytes.length);
+                                response.content().writeBytes(bytes);
+                                ctx.writeAndFlush(response);
+                            }
+                        });
+                    }
+                })
+                .bind(8080);
+    }
+}
+```
+
+自定义协议因素 最好是2^n
+
+魔数
+
+版本号
+
+序列化算法
+
+指令类型
+
+请求序号
+
+长度
+
+正文
+
+```java
+//ByteToMessageCodec在构造方法中会检查是否有@ChannelHandler.Sharable注解 因为设计之处不允许是单例的 需要创建多个实例
+// 可以换为extends MessageToMessageCodec<ByteBuf, Message>  允许shareable 注解标注 可以单个实例
+public class MessageCodec extends ByteToMessageCodec<Message> {
+    @Override
+    public void encode(ChannelHandlerContext ctx, Message msg, ByteBuf out) throws Exception {
+        // 1. 4 字节的魔数
+        out.writeBytes(new byte[]{1, 2, 3, 4});
+        // 2. 1 字节的版本,
+        out.writeByte(1);
+        // 3. 1 字节的序列化方式 jdk 0 , json 1
+        out.writeByte(0);
+        // 4. 1 字节的指令类型
+        out.writeByte(msg.getMessageType());
+        // 5. 4 个字节
+        out.writeInt(msg.getSequenceId());
+        // 无意义，对齐填充
+        out.writeByte(0xff);
+        // 6. 获取内容的字节数组
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        ObjectOutputStream oos = new ObjectOutputStream(bos);
+        oos.writeObject(msg);
+        byte[] bytes = bos.toByteArray();
+        // 7. 长度
+        out.writeInt(bytes.length);
+        // 8. 写入内容
+        out.writeBytes(bytes);
+    }
+
+    @Override
+    protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+        int magicNum = in.readInt();
+        byte version = in.readByte();
+        byte serializerType = in.readByte();
+        byte messageType = in.readByte();
+        int sequenceId = in.readInt();
+        in.readByte();
+        int length = in.readInt();
+        byte[] bytes = new byte[length];
+        in.readBytes(bytes, 0, length);
+        ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(bytes));
+        Message message = (Message) ois.readObject();
+        log.debug("{}, {}, {}, {}, {}, {}", magicNum, version, serializerType, messageType, sequenceId, length);
+        log.debug("{}", message);
+        out.add(message);
+    }
+}
+```
+
+### 序列化与反序列化
+
+将对象转换为byte数组
+
+将byte数组转换为对象
+
+java 
+
+json
+
+```java
+public interface Serializer {
+
+    // 反序列化方法
+    <T> T deserialize(Class<T> clazz, byte[] bytes);
+
+    // 序列化方法
+    <T> byte[] serialize(T object);
+enum SerializerAlgorithm implements Serializer {
+	// Java 实现
+    Java {
+        @Override
+        public <T> T deserialize(Class<T> clazz, byte[] bytes) {
+            try {
+                ObjectInputStream in = 
+                    new ObjectInputStream(new ByteArrayInputStream(bytes));
+                Object object = in.readObject();
+                return (T) object;
+            } catch (IOException | ClassNotFoundException e) {
+                throw new RuntimeException("SerializerAlgorithm.Java 反序列化错误", e);
+            }
+        }
+
+        @Override
+        public <T> byte[] serialize(T object) {
+            try {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                new ObjectOutputStream(out).writeObject(object);
+                return out.toByteArray();
+            } catch (IOException e) {
+                throw new RuntimeException("SerializerAlgorithm.Java 序列化错误", e);
+            }
+        }
+    }, 
+    // Json 实现(引入了 Gson 依赖)
+    Json {
+        @Override
+        public <T> T deserialize(Class<T> clazz, byte[] bytes) {
+            return new Gson().fromJson(new String(bytes, StandardCharsets.UTF_8), clazz);
+        }
+
+        @Override
+        public <T> byte[] serialize(T object) {
+            return new Gson().toJson(object).getBytes(StandardCharsets.UTF_8);
+        }
+    };
+
+    // 需要从协议的字节中得到是哪种序列化算法
+    public static SerializerAlgorithm getByInt(int type) {
+        SerializerAlgorithm[] array = SerializerAlgorithm.values();
+        if (type < 0 || type > array.length - 1) {
+            throw new IllegalArgumentException("超过 SerializerAlgorithm 范围");
+        }
+        return array[type];
+    }
+}
+}
+```
+
+
+
+### 心跳检测
+
+```java
+ch.pipeline().addLast(new IdleStateHandler(5, 3, 0)); //5s检测 3s发送 每隔一段时间触发事件
+                    ch.pipeline().addLast(new ChannelDuplexHandler() {
+                        // 用来触发特殊事件
+                        @Override
+                        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception{
+                            IdleStateEvent event = (IdleStateEvent) evt;
+                            // 触发了读空闲事件
+                            if (event.state() == IdleState.READER_IDLE) {
+                                log.debug("已经 5s 没有读到数据了");
+                                ctx.channel().close();
+                            }
+                            if(event.state()==IdleState.WRITER_IDLE) {
+                                log.debug("3s心跳检测");
+                            }
+                        }
+                    });
 
 ```
 
+### 实战
+
+一堆handler
+
+先用LengthFieldBasedFrameDecoder 解决粘包问题
+
+再用 MessageToMessageCodec 解析协议
+
+最后业务handler
+
+```java
+ ServerBootstrap serverBootstrap = new ServerBootstrap();
+            serverBootstrap.channel(NioServerSocketChannel.class);
+            serverBootstrap.group(boss, worker);
+            serverBootstrap.childHandler(new ChannelInitializer<SocketChannel>() {
+                @Override
+                protected void initChannel(SocketChannel ch) {
+                    ch.pipeline().addLast(new LengthFieldBasedFrameDecoder());
+//                    ch.pipeline().addLast(LOGGING_HANDLER);
+                    ch.pipeline().addLast(new IdleStateHandler(5, 3, 0));
+                    // ChannelDuplexHandler 可以同时作为入站和出站处理器
+                    ch.pipeline().addLast(new ChannelDuplexHandler() {
+                        // 用来触发特殊事件
+                        @Override
+                        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception{
+                            IdleStateEvent event = (IdleStateEvent) evt;
+                            // 触发了读空闲事件
+                            if (event.state() == IdleState.READER_IDLE) {
+                                log.debug("已经 5s 没有读到数据了");
+                                ctx.channel().close();
+                            }
+                            if(event.state()==IdleState.WRITER_IDLE) {
+                                log.debug("3s心跳检测");
+                            }
+                        }
+                    });
+                    ch.pipeline().addLast(MESSAGE_CODEC);
+                    ch.pipeline().addLast(LOGIN_HANDLER);
+                    ch.pipeline().addLast(CHAT_HANDLER);
+                    ch.pipeline().addLast(GROUP_CREATE_HANDLER);
+                    ch.pipeline().addLast(GROUP_JOIN_HANDLER);
+                    ch.pipeline().addLast(GROUP_MEMBERS_HANDLER);
+                    ch.pipeline().addLast(GROUP_QUIT_HANDLER);
+                    ch.pipeline().addLast(GROUP_CHAT_HANDLER);
+//                    ch.pipeline().addLast(QUIT_HANDLER);
+                }
+```
+
+### 优化参数
+
+**CONNECT_TIMEOUT_MILLIS**
+
+* 属于 SocketChannal 参数
+* 用在客户端建立连接时，如果在指定毫秒内无法连接，会抛出 timeout 异常
+* 设置在0-2s内，因为2s后会抛出java.net.connectionException 而不是超时异常
+* 区别 SO_TIMEOUT 主要用在阻塞 IO，阻塞 IO 中 accept，read 等都是无限等待的，如果不希望永远阻塞，使用它调整超时时间
+
+源码实现
+
+eventloop是定时任务线程池，向其中提交定时任务，超时检查
+
+ **SO_BACKLOG**
+
+- 属于 ServerSocketChannal 参数
+- 修改tcp三次握手时 半连接队列和全连接队列的大小
+
+**ulimit -n**
+
+* 属于操作系统参数
+* 设置最大个数文件描述符
+
+**TCP_NODELAY**
+
+* 属于 SocketChannal 参数
+* 是否不开启nagle算法
+
+**SO_SNDBUF & SO_RCVBUF**
+
+* SO_SNDBUF 属于 SocketChannal 参数
+* SO_RCVBUF 既可用于 SocketChannal 参数，也可以用于 ServerSocketChannal 参数（建议设置到 ServerSocketChannal 上）
+* 缓冲区大小
+
+## 源码待补
+
+### 启动流程
+
+NIO原本启动流程 
+
+netty中如何体现
+
+```java
+//1 netty 中使用 NioEventLoopGroup （简称 nio boss 线程）来封装线程和 selector
+Selector selector = Selector.open(); 
+
+//2 创建 NioServerSocketChannel，同时会初始化它关联的 handler，以及为原生 ssc 存储 config
+NioServerSocketChannel attachment = new NioServerSocketChannel();
+
+//3 创建 NioServerSocketChannel 时，创建了 java 原生的 ServerSocketChannel
+ServerSocketChannel serverSocketChannel = ServerSocketChannel.open(); 
+serverSocketChannel.configureBlocking(false);
+
+//4 启动 nio boss 线程执行接下来的操作
+
+//5 注册（仅关联 selector 和 NioServerSocketChannel），未关注事件
+SelectionKey selectionKey = serverSocketChannel.register(selector, 0, attachment);
+
+//6 head -> 初始化器 -> ServerBootstrapAcceptor -> tail，初始化器是一次性的，只为添加 acceptor
+
+//7 绑定端口
+serverSocketChannel.bind(new InetSocketAddress(8080));
+
+//8 触发 channel active 事件，在 head 中关注 op_accept 事件
+selectionKey.interestOps(SelectionKey.OP_ACCEPT);
+```
+
+###  NioEventLoop
+
+有两个selector 一个包装后的，一个原生的，将包装后的selector的key从set变为数组
+
+如果需要遍历，就遍历包装后的

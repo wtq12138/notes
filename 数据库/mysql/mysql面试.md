@@ -1,5 +1,7 @@
 https://www.cnblogs.com/ZhuChangwu/p/13953209.html
 
+https://www.cnblogs.com/xiaolincoding/p/16396502.html
+
 # 原理
 
 ## 三大范式
@@ -16,21 +18,15 @@ InnoDB 是聚集索引，数据文件是和索引绑在一起的，必须要有�
 
 MyISAM 是非聚集索引，数据文件是分离的，索引保存的是数据文件的指针，主键索引和辅助索引是独立的。
 
-## 超键、候选键、主键、外键分别是什么？
-
-候选键 最小超键
-
-超键 只要能标明身份的推出其他属性的
-
-主键 唯一标识 任一个候选键
-
-外键 其他表的主键
-
 ## 表文件结构
 
 ![img](https://oss-emcsprod-public.modb.pro/wechatSpider/modb_20210905_8350a3dc-0de7-11ec-9c8b-38f9d3cd240d.png)
 
 ## 三大日志
+
+redolog 持久性
+
+undolog 原子性
 
 ![QQ截图20220320111101](F:\资料\八股复习\冲冲冲\数据库\mysql\images\QQ截图20220320111101.png)
 
@@ -50,7 +46,7 @@ redo_log要先写到redo_log buffer中再刷盘 默认是提交事务后刷盘 �
 
 - **0** ：设置为 0 的时候，表示每次事务提交时不进行刷盘操作
 - **1** ：设置为 1 的时候，表示每次事务提交时都将进行刷盘操作（默认值）
-- **2** ：设置为 2 的时候，表示每次事务提交时都只把 redo log buffer 内容写入 page cache
+- **2** ：设置为 2 的时候，表示每次事务提交时都只把 redo log buffer 内容写入 page cache，而不进行fsync
 - 后台线程每秒刷盘一次
 
 **环形存储**
@@ -192,7 +188,25 @@ unique pk fk check not null
 
 无法使用覆盖索引
 
+## **类型用什么?**
 
+枚举 tinyint
+
+货币decimal
+
+时间 timestamp 有时间限制但是可以自动转换时区 能表示的时间范围为 4字节   1970-01-01 08:00:01到2038-01-19 11:14:07
+
+datetime 8字节 无时区
+
+bolb和text等大文件尽量不用 存oss地址
+
+## 为什么要NOT NULL
+
+可读性好
+
+NULL值到非NULL容易索引分裂
+
+NOT IN、!= 等负向条件查询在有 NULL 值的情况下返回永远为空结果，查询容易出错
 
 # 索引
 

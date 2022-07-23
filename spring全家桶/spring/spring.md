@@ -938,4 +938,4 @@ Rest原理
 - 表单提交会带上**_method=PUT**
 - **请求过来被**HiddenHttpMethodFilter拦截
 - - - **包装模式requesWrapper重写了getMethod方法，返回的是传入的值。**
-    - **过滤器链放行的时候用wrapper。以后的方法调用getMethod是调用****requesWrapper的。**
+      - **过滤器链放行的时候用wrapper。以后的方法调用getMethod是调用****requesWrapper的。**
