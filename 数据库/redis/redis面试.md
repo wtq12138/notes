@@ -70,14 +70,13 @@ redis的key的结构
 
 ```c++
 typedef struct redisObject {
-    // 类型 
-    unsigned type:4;对应五种数据类型
-    // 编码
-    unsigned encoding:4; 对应底层数据结构
-    // 指向底层实现数据结构的指针
-    void *ptr; void指针可以用来数据类型转换 eg:void*p; int a=1;p=&a; *(int*)p=a=1
-    // ...
+    unsigned type:4;//对象类型（4位=0.5字节）
+    unsigned encoding:4;//编码（4位=0.5字节）
+    unsigned lru:LRU_BITS;//记录对象最后一次被应用程序访问的时间（24位=3字节）
+    int refcount;//引用计数。等于0时表示可以被垃圾回收（32位=4字节）
+    void *ptr;//指向底层实际的数据存储结构，如：SDS等(8字节)
 } robj;
+16字节
 ```
 
 ## string实现
@@ -88,14 +87,27 @@ SDS simple dynamic string
 struct sdshdr {
 
     // buf 已占用长度
-    int len;
+    unsigned int  len;
 
     // buf 剩余可用长度
-    int free;
+    unsigned int  free;
 
     // 实际保存字符串数据的地方
     char buf[];
 };
+16字节+4字节+4字节+'/0' 故一开始embstr的分界线是39后来redis版本更新后
+数据结构优化为sdshdrN N为8、16、32、64
+struct __attribute__ ((__packed__)) sdshdr8 {
+    //buf 已经使用的长度
+    uint8_t len; /* used */
+    //buf 分配的长度，等于buf[]的总长度-1，因为buf有包括一个/0的结束符
+    uint8_t alloc; /* excluding the header and null terminator */
+    //只有3位有效位，因为类型的表示就是0到4，所有这个8位的flags 有5位没有被用到
+    unsigned char flags; /* 3 lsb of type, 5 unused bits */
+    //实际的字符串存在这里
+    char buf[];
+};  
+而embstr显然使用的是sdshdr8 即为1字节+1字节+1字节相较于39多剩余5个
 ```
 
 O(1)求len
@@ -116,6 +128,8 @@ O(1)求len
 encoding可以是**int(8位longlong)、embstr或者raw**
 
 embstr存储小于等于44字节的字符串 sds与redisobject 连续 内存只分配一次
+
+可以用 `long double` 类型表示的浮点数在 Redis 中也是作为字符串值来保存的
 
 raw 存大于的 sds与redisobject 不连续 内存分配两次
 
