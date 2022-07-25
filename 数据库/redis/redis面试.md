@@ -110,11 +110,11 @@ struct __attribute__ ((__packed__)) sdshdr8 {
 而embstr显然使用的是sdshdr8 即为1字节+1字节+1字节相较于39多剩余5个
 ```
 
-O(1)求len
+**O(1)求len**s
 
-二进制安全
+**二进制安全**
 
-空间预分配和惰性空间释放
+**空间预分配和惰性空间释放**
 
 **空间预分配**
 
@@ -158,9 +158,22 @@ typedef struct dict {
     int rehashidx; /* rehashing not in progress if rehashidx == -1 */
 
 } dict;
+
 ```
 
 一开始是ziplist，之后变为dict
+
+触发扩容的条件包括：
+
+- 服务器当前没有在执行 BGSAVE 命令或者 BGREWRITEAOF 命令，并且 load factor >= 1；
+
+- 服务器当前正在执行 BGSAVE 命令或者 BGREWRITEAOF 命令，并且 load factor >= 5；
+
+- 触发缩容的条件：
+
+  负载因子 < 0.1 时（(ht[0].used / ht[0].siz) < 0.1）
+
+  
 
 一个字典有两个哈希表，多的那个用来扩容，进行渐进式rehash，采用链地址法进行hash碰撞处理
 
@@ -168,6 +181,9 @@ typedef struct dict {
 2. 在字典中维持一个索引计数器变量 `rehashidx` ， 并将它的值设置为 `0` ， 表示 rehash 工作正式开始。
 3. 在 rehash 进行期间， 每次对字典执行添加、删除、查找或者更新操作时， 程序除了执行指定的操作以外， 还会顺带将 `ht[0]` 哈希表在 `rehashidx` 索引上的所有键值对 rehash 到 `ht[1]` ， 当 rehash 工作完成之后， 程序将 `rehashidx` 属性的值增一。
 4. 随着字典操作的不断执行， 最终在某个时间点上， `ht[0]` 的所有键值对都会被 rehash 至 `ht[1]` ， 这时程序将 `rehashidx` 属性的值设为 `-1` ， 表示 rehash 操作已完成。
+5. 结束后ht[0]为空表而ht[1]拥有所有键值对，将指针指向对调等待下一次rehash
+
+**每次rehash的单位是整个桶上的节点，而不是单个节点**
 
 渐进式hash开始后，rud会在两个表上进行，而c只在ht[1]进行
 
@@ -179,13 +195,43 @@ typedef struct dict {
 
 ## zset实现
 
-小的时候ziplist，有序链表
+小的时候：
+
+- 有序集合保存的元素数量小于128个
+- 有序集合保存的所有元素的长度小于64字节
+
+ziplist，有序链表
 
 大的时候skiplist 使用跳表和字典 
 
-跳表实现有序，字典实现O(1)查找
+```c
+typedef struct zskiplistNode {
+    //Zset 对象的元素值
+    sds ele;
+    //元素权重值
+    double score;
+    //后向指针
+    struct zskiplistNode *backward;
+  
+    //节点的level数组，保存每层上的前向指针和跨度
+    struct zskiplistLevel {
+        struct zskiplistNode *forward;
+        unsigned long span;
+    } level[];
+} zskiplistNode;
+
+typedef struct zskiplist {
+    struct zskiplistNode *header, *tail;
+    unsigned long length;
+    int level;
+} zskiplist;
+```
+
+跳表实现有序便于range，字典实现O(1)查找key对应的score
 
 跳表插入是随机化插入多少层
+
+**跳表在创建节点时候，会生成范围为[0-1]的一个随机数，如果这个随机数小于 0.25（相当于概率 25%），那么层数就增加 1 层，然后继续生成下一个随机数，直到随机数的结果大于 0.25 结束，最终确定该节点的层数**。
 
 # 事务
 
@@ -213,9 +259,13 @@ rdb
 
 写时复制技术，当bgsave时，redis执行写操作，会复制一个副本，主线程对副本进行写操作，而原来那个会一直被子进程进行bgsave操作
 
+COW (copy on write)
+
 `fork()` 之后，内核会把父进程的所有内存页都标记为**只读**。一旦其中一个进程尝试写入某个内存页，就会触发一个保护故障（缺页异常），此时会陷入内核。
 
 内核将拦截写入，并为尝试写入的进程创建这个页面的一个**新副本**，恢复这个页面的**可写权限**，然后重新执行这个写操作，这时就可以正常执行了。
+
+
 
 aof
 
@@ -225,7 +275,7 @@ aof
 
 定时删除 每个key一个定时器 到期自动删除 内存友好 cpu不友好
 
-惰性删除 用的时候取检查是否过期 cpu友好 内存友好
+惰性删除 用的时候取检查是否过期 内存不友好 cpu友好 
 
 定期删除 定期对一批设置过期时间的key进行检查
 
@@ -245,13 +295,17 @@ random
 
 ## 主从复制原理
 
-salve 启动成功向master发送一个psync 
+复制分为两种**全量复制和增量复制**
 
-进行判断是否需要重新连接 根据三个概念 **offset buffer  服务器runid**
+salve 启动成功向master发送一个psync (offset,runid)
 
-判断 先判断服务器runid是否相同，如果相同判断offset的数据是否在buffer中
+进行判断是否需要重新连接 根据三个概念 **offset(双方都同时维护用来记录buffer中命令复制的情况)   服务器runid  buffer**（**固定长度的、先进先出(FIFO)队列**）
 
-是的话要进行一次全量复制，**master执行bgsave生成.rdb**，使用复制buffer记录从现在开始执行的写命令，然后将.rdb发送给从slave
+判断 先判断服务器runid是否相同，如果相同判断offset的数据是否在master的buffer中
+
+如果满足条件可以进行增量复制，否则如第一次发送psync或者当主从节点offset的差距过大超过缓冲区长度。
+
+要进行一次全量复制，**master执行bgsave生成.rdb**，使用复制buffer记录从现在开始执行的写命令，然后将.rdb发送给从slave
 
 slave清除旧数据，使用rdb更新为master bgsave时的状态
 
@@ -262,7 +316,7 @@ master将buffer中的命令发给slave，slave执行保持数据同步
 slave不会主动淘汰过期key
 
 1. 主动scan扫库 利用惰性删除
-2. 升级版本 在读取数据时增加了过期判断
+2. 升级版本 从库在读取数据时增加了过期判断
 
 ## 主从数据丢失问题
 
@@ -300,7 +354,15 @@ slave不会主动淘汰过期key
 
 master客观下线后，sentinel通过raft算法选举出leader进行master选举
 
-基于四个条件 **slave与master断开时间** 超过指定值不选举，**优先级**  值越小越高  0不参加选举，**offse**t越大说明和master数据越接近，**运行id**越小说明运行时间越长
+基于四个条件
+
+**slave与master断开时间** 超过指定值不选举，
+
+**优先级**  值越小越高  0不参加选举，
+
+**offse**t越大说明和master数据越接近，
+
+**run id**越小说明运行时间越长
 
 sentinel通知 新的master slaveof no one成为master，通知其他slave slaveof leader 
 
@@ -318,7 +380,7 @@ sentinel通知 新的master slaveof no one成为master，通知其他slave slave
 
 先删再改
 
-问题：删掉 后别人查旧数据并且写到缓存中，然后自己才改掉数据库
+问题：删掉 后别人查数据库旧数据并且写到缓存中，然后自己才改掉数据库
 
 延时双删
 
